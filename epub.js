@@ -549,14 +549,21 @@ class MediaOverlay extends EventTarget {
         this.#stop()
     }
     prev() {
-        if (this.#itemIndex > 0) this.#play(this.#audioIndex, this.#itemIndex - 1, this.#taskToken)
-        else if (this.#audioIndex > 0) this.#play(this.#audioIndex - 1,
-            this.#entries[this.#audioIndex - 1].items.length - 1, this.#taskToken)
+        if (this.#itemIndex > 0) {
+            const token = ++this.#taskToken
+            this.#play(this.#audioIndex, this.#itemIndex - 1, token)
+        }
+        else if (this.#audioIndex > 0) {
+            const token = ++this.#taskToken
+            this.#play(this.#audioIndex - 1,
+                this.#entries[this.#audioIndex - 1].items.length - 1, token)
+        }
         else if (this.#sectionIndex > 0)
             this.start(this.#sectionIndex - 1, (_, i, items) => i === items.length - 1)
     }
     next() {
-        this.#play(this.#audioIndex, this.#itemIndex + 1, this.#taskToken)
+        const token = ++this.#taskToken
+        this.#play(this.#audioIndex, this.#itemIndex + 1, token)
     }
     setVolume(volume) {
         this.#volume = volume
