@@ -401,6 +401,7 @@ class MediaOverlay extends EventTarget {
     #volume = 1
     #rate = 1
     #state
+    #taskToken = 0
     constructor(book, loadXML) {
         super()
         this.book = book
@@ -443,26 +444,34 @@ class MediaOverlay extends EventTarget {
     #unhighlight() {
         this.dispatchEvent(new CustomEvent('unhighlight', { detail: this.#activeItem }))
     }
-    async #play(audioIndex, itemIndex) {
+    async #play(audioIndex, itemIndex, token) {
         this.#stop()
+        if (token !== this.#taskToken) return
         this.#audioIndex = audioIndex
         this.#itemIndex = itemIndex
         const src = this.#activeAudio?.src
         if (!src || !this.#activeItem) return this.start(this.#sectionIndex + 1)
 
-        const url = URL.createObjectURL(await this.book.loadBlob(src))
+        const blob = await this.book.loadBlob(src)
+        if (token !== this.#taskToken) return
+        const url = URL.createObjectURL(blob)
         const audio = new Audio(url)
+        if (token !== this.#taskToken) {
+            URL.revokeObjectURL(url)
+            return
+        }
         this.#audio = audio
         audio.volume = this.#volume
         audio.playbackRate = this.#rate
         audio.addEventListener('timeupdate', () => {
+            if (token !== this.#taskToken) return
             if (audio.paused) return
             const t = audio.currentTime
             const { items } = this.#activeAudio
             if (t > this.#activeItem?.end) {
                 this.#unhighlight()
                 if (this.#itemIndex === items.length - 1) {
-                    this.#play(this.#audioIndex + 1, 0).catch(e => this.#error(e))
+                    this.#play(this.#audioIndex + 1, 0, this.#taskToken).catch(e => this.#error(e))
                     return
                 }
             }
@@ -470,20 +479,27 @@ class MediaOverlay extends EventTarget {
             while (items[this.#itemIndex + 1]?.begin <= t) this.#itemIndex++
             if (this.#itemIndex !== oldIndex) this.#highlight()
         })
-        audio.addEventListener('error', () =>
-            this.#error(new Error(`Failed to load ${src}`)))
-        audio.addEventListener('playing', () => this.#highlight())
+        audio.addEventListener('error', () => {
+            if (token !== this.#taskToken) return
+            this.#error(new Error(`Failed to load ${src}`))
+        })
+        audio.addEventListener('playing', () => {
+            if (token !== this.#taskToken) return
+            this.#highlight()
+        })
         audio.addEventListener('ended', () => {
+            if (token !== this.#taskToken) return
             this.#unhighlight()
             URL.revokeObjectURL(url)
             this.#audio = null
-            this.#play(audioIndex + 1, 0).catch(e => this.#error(e))
+            this.#play(audioIndex + 1, 0, this.#taskToken).catch(e => this.#error(e))
         })
         if (this.#state === 'paused') {
             this.#highlight()
             audio.currentTime = this.#activeItem.begin ?? 0
         }
         else audio.addEventListener('canplaythrough', () => {
+            if (token !== this.#taskToken) return
             // for some reason need to seek in `canplaythrough`
             // or it won't play when skipping in WebKit
             audio.currentTime = this.#activeItem.begin ?? 0
@@ -493,6 +509,7 @@ class MediaOverlay extends EventTarget {
     }
     async start(sectionIndex, filter = () => true) {
         this.#audio?.pause()
+        const token = ++this.#taskToken
         const section = this.book.sections[sectionIndex]
         const href = section?.id
         if (!href) return
@@ -506,7 +523,7 @@ class MediaOverlay extends EventTarget {
             const { items } = this.#entries[i]
             for (let j = 0; j < items.length; j++) {
                 if (items[j].text.split('#')[0] === href && filter(items[j], j, items))
-                    return this.#play(i, j).catch(e => this.#error(e))
+                    return this.#play(i, j, token).catch(e => this.#error(e))
             }
         }
     }
@@ -528,17 +545,18 @@ class MediaOverlay extends EventTarget {
     }
     stop() {
         this.#state = 'stopped'
+        this.#taskToken++
         this.#stop()
     }
     prev() {
-        if (this.#itemIndex > 0) this.#play(this.#audioIndex, this.#itemIndex - 1)
+        if (this.#itemIndex > 0) this.#play(this.#audioIndex, this.#itemIndex - 1, this.#taskToken)
         else if (this.#audioIndex > 0) this.#play(this.#audioIndex - 1,
-            this.#entries[this.#audioIndex - 1].items.length - 1)
+            this.#entries[this.#audioIndex - 1].items.length - 1, this.#taskToken)
         else if (this.#sectionIndex > 0)
             this.start(this.#sectionIndex - 1, (_, i, items) => i === items.length - 1)
     }
     next() {
-        this.#play(this.#audioIndex, this.#itemIndex + 1)
+        this.#play(this.#audioIndex, this.#itemIndex + 1, this.#taskToken)
     }
     setVolume(volume) {
         this.#volume = volume
