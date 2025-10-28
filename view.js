@@ -471,6 +471,10 @@ export class View extends HTMLElement {
         await this.renderer.goTo({ index, anchor })
         this.history.pushState({ fraction: frac })
     }
+    async goToFractionInSection(index, frac) {
+        await this.renderer.goTo({ index, anchor: frac })
+        this.history.pushState({ index, fraction: frac })
+    }
     async select(target) {
         try {
             const obj = await this.resolveNavigation(target)
