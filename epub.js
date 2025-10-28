@@ -402,6 +402,11 @@ class MediaOverlay extends EventTarget {
     #rate = 1
     #state
     #taskToken = 0
+    #entryDurations = []
+    #sectionDurations = new Map()
+    #bookDuration = null
+    #bookDurationPromise = null
+    #lastKnownChapterElapsed = 0
     constructor(book, loadXML) {
         super()
         this.book = book
@@ -409,12 +414,18 @@ class MediaOverlay extends EventTarget {
     }
     async #loadSMIL(item) {
         if (this.#lastMediaOverlayItem === item) return
+        const entries = await this.#parseMediaOverlayEntries(item)
+        this.#audioIndex = -1
+        this.#itemIndex = -1
+        this.#entries = entries
+        this.#updateDurationCaches(entries)
+        this.#lastMediaOverlayItem = item
+    }
+    async #parseMediaOverlayEntries(item) {
         const doc = await this.loadXML(item.href)
         const resolve = href => href ? resolveURL(href, item.href) : null
         const { $, $$$ } = childGetter(doc, NS.SMIL)
-        this.#audioIndex = -1
-        this.#itemIndex = -1
-        this.#entries = $$$(doc, 'par').reduce((arr, $par) => {
+        return $$$(doc, 'par').reduce((arr, $par) => {
             const text = resolve($($par, 'text')?.getAttribute('src'))
             const $audio = $($par, 'audio')
             if (!text || !$audio) return arr
@@ -426,7 +437,131 @@ class MediaOverlay extends EventTarget {
             else arr.push({ src, items: [{ text, begin, end }] })
             return arr
         }, [])
-        this.#lastMediaOverlayItem = item
+    }
+    #updateDurationCaches(entries) {
+        const { perEntry, totalDuration } = this.#calculateDurationStats(entries)
+        this.#entryDurations = perEntry
+        if (Number.isFinite(totalDuration) && this.#sectionIndex !== undefined) {
+            this.#sectionDurations.set(this.#sectionIndex, totalDuration)
+            if (this.#bookDuration !== null) this.#bookDuration = this.#totalDurationFromMap()
+        }
+        return totalDuration
+    }
+    #calculateDurationStats(entries) {
+        let totalDuration = 0
+        const perEntry = entries.map(entry => {
+            const itemDurations = entry.items.map((item, idx) => {
+                const next = entry.items[idx + 1]
+                const begin = item.begin ?? 0
+                let end = item.end
+                if (end == null && next?.begin != null) end = next.begin
+                const duration = end != null ? Math.max(0, end - begin) : 0
+                return duration
+            })
+            const entryTotal = itemDurations.reduce((sum, val) => sum + val, 0)
+            totalDuration += entryTotal
+            return { total: entryTotal, itemDurations }
+        })
+        return { perEntry, totalDuration }
+    }
+    #sumDurationsBeforeSection(sectionIndex) {
+        if (!Number.isInteger(sectionIndex) || sectionIndex <= 0) return 0
+        let sum = 0
+        for (let i = 0; i < sectionIndex; i++) {
+            const value = this.#sectionDurations.get(i)
+            if (typeof value === 'number' && isFinite(value)) sum += value
+        }
+        return sum
+    }
+    #totalDurationFromMap() {
+        let sum = 0
+        for (const value of this.#sectionDurations.values()) {
+            if (typeof value === 'number' && isFinite(value)) sum += value
+        }
+        return sum
+    }
+    #emitProgress() {
+        const snapshot = this.getProgressSnapshot()
+        if (snapshot) this.dispatchEvent(new CustomEvent('progress', { detail: snapshot }))
+    }
+    #ensureBookDurationComputation() {
+        if (this.#bookDurationPromise || !this.book?.sections?.length) return
+        this.#bookDurationPromise = this.#computeBookDuration()
+            .catch(error => {
+                console.error('MediaOverlay: Failed to compute book duration', error)
+                this.#bookDuration = null
+                this.#bookDurationPromise = null
+            })
+    }
+    async #computeBookDuration() {
+        const sections = this.book?.sections ?? []
+        for (let index = 0; index < sections.length; index++) {
+            if (this.#sectionDurations.has(index)) continue
+            const section = sections[index]
+            const { mediaOverlay } = section ?? {}
+            if (!mediaOverlay) {
+                this.#sectionDurations.set(index, 0)
+                continue
+            }
+            try {
+                const entries = await this.#parseMediaOverlayEntries(mediaOverlay)
+                const { totalDuration } = this.#calculateDurationStats(entries)
+                this.#sectionDurations.set(index, totalDuration)
+            } catch (error) {
+                console.error(`MediaOverlay: Failed to parse media overlay for section ${index}`, error)
+            }
+        }
+        this.#bookDuration = this.#totalDurationFromMap()
+        this.#emitProgress()
+        return this.#bookDuration
+    }
+    prepareDurationMetadata() {
+        this.#ensureBookDurationComputation()
+    }
+    getProgressSnapshot() {
+        if (this.#sectionIndex == null) return null
+        const sectionCount = this.book?.sections?.length ?? 0
+        const chapterDuration =
+            this.#sectionDurations.get(this.#sectionIndex)
+            ?? this.#entryDurations.reduce((sum, entry) => sum + (entry?.total ?? 0), 0)
+        let elapsed = 0
+        if (this.#entryDurations.length && this.#audioIndex != null && this.#audioIndex >= 0) {
+            for (let i = 0; i < this.#audioIndex; i++)
+                elapsed += this.#entryDurations[i]?.total ?? 0
+            const currentEntry = this.#entryDurations[this.#audioIndex]
+            if (currentEntry) {
+                for (let j = 0; j < this.#itemIndex; j++)
+                    elapsed += currentEntry.itemDurations[j] ?? 0
+                const currentItem = this.#activeItem
+                const audio = this.#audio
+                if (currentItem && audio) {
+                    const begin = currentItem.begin ?? 0
+                    const duration =
+                        currentEntry.itemDurations[this.#itemIndex]
+                        ?? ((currentItem.end ?? begin) - begin)
+                    const offset = Math.max(0, audio.currentTime - begin)
+                    elapsed += duration ? Math.min(offset, duration) : offset
+                }
+            }
+        } else if (this.#lastKnownChapterElapsed != null) elapsed = this.#lastKnownChapterElapsed
+        const base = this.#sumDurationsBeforeSection(this.#sectionIndex)
+        const bookElapsed = base + elapsed
+        this.#lastKnownChapterElapsed = elapsed
+        return {
+            sectionIndex: this.#sectionIndex,
+            sectionCount,
+            chapter: {
+                elapsedSeconds: elapsed,
+                totalSeconds: chapterDuration ?? null,
+            },
+            book: {
+                elapsedSeconds: bookElapsed,
+                totalSeconds: this.#bookDuration,
+            },
+            durationComputationState: {
+                hasBookDuration: this.#bookDuration !== null,
+            },
+        }
     }
     get #activeAudio() {
         return this.#entries[this.#audioIndex]
@@ -440,9 +575,11 @@ class MediaOverlay extends EventTarget {
     }
     #highlight() {
         this.dispatchEvent(new CustomEvent('highlight', { detail: this.#activeItem }))
+        this.#emitProgress()
     }
     #unhighlight() {
         this.dispatchEvent(new CustomEvent('unhighlight', { detail: this.#activeItem }))
+        this.#emitProgress()
     }
     async #play(audioIndex, itemIndex, token) {
         this.#stop()
@@ -478,14 +615,17 @@ class MediaOverlay extends EventTarget {
             const oldIndex = this.#itemIndex
             while (items[this.#itemIndex + 1]?.begin <= t) this.#itemIndex++
             if (this.#itemIndex !== oldIndex) this.#highlight()
+            this.#emitProgress()
         })
         audio.addEventListener('error', () => {
             if (token !== this.#taskToken) return
             this.#error(new Error(`Failed to load ${src}`))
+            this.#emitProgress()
         })
         audio.addEventListener('playing', () => {
             if (token !== this.#taskToken) return
             this.#highlight()
+            this.#emitProgress()
         })
         audio.addEventListener('ended', () => {
             if (token !== this.#taskToken) return
@@ -493,6 +633,7 @@ class MediaOverlay extends EventTarget {
             URL.revokeObjectURL(url)
             this.#audio = null
             this.#play(audioIndex + 1, 0, this.#taskToken).catch(e => this.#error(e))
+            this.#emitProgress()
         })
         if (this.#state === 'paused') {
             this.#highlight()
@@ -506,6 +647,7 @@ class MediaOverlay extends EventTarget {
             this.#state = 'playing'
             audio.play().catch(e => this.#error(e))
         }, { once: true })
+        this.#emitProgress()
     }
     async start(sectionIndex, filter = () => true) {
         this.#audio?.pause()
@@ -518,6 +660,7 @@ class MediaOverlay extends EventTarget {
         if (!mediaOverlay) return this.start(sectionIndex + 1)
         this.#sectionIndex = sectionIndex
         await this.#loadSMIL(mediaOverlay)
+        this.#ensureBookDurationComputation()
 
         for (let i = 0; i < this.#entries.length; i++) {
             const { items } = this.#entries[i]
@@ -526,14 +669,17 @@ class MediaOverlay extends EventTarget {
                     return this.#play(i, j, token).catch(e => this.#error(e))
             }
         }
+        this.#emitProgress()
     }
     pause() {
         this.#state = 'paused'
         this.#audio?.pause()
+        this.#emitProgress()
     }
     resume() {
         this.#state = 'playing'
         this.#audio?.play().catch(e => this.#error(e))
+        this.#emitProgress()
     }
     #stop() {
         if (this.#audio) {
@@ -541,6 +687,7 @@ class MediaOverlay extends EventTarget {
             URL.revokeObjectURL(this.#audio.src)
             this.#audio = null
             this.#unhighlight()
+            this.#emitProgress()
         }
     }
     stop() {
