@@ -473,7 +473,11 @@ export class View extends HTMLElement {
                             })
 
                             if (duration > 0.5) {
-                                const flipTime = (currentItem.begin ?? 0) + (duration * splitInfo.visibleRatio)
+                                const earlyOffset = 1.0
+                                const flipTime = Math.max(
+                                    currentItem.begin ?? 0,
+                                    (currentItem.begin ?? 0) + (duration * splitInfo.visibleRatio) - earlyOffset
+                                )
 
                                 console.log('Scheduling flip at', flipTime)
 
