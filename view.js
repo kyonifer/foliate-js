@@ -269,7 +269,184 @@ export class View extends HTMLElement {
             const playbackActiveClass = book.media.playbackActiveClass
             this.mediaOverlay = book.getMediaOverlay()
             let lastActive
+            let pageFlipTimeupdateHandler = null
+
+            /**
+             * Cleanup function to remove scheduled page flip handlers.
+             * Called when a sentence ends, playback stops, or a new sentence begins
+             * to prevent stale flip timers from triggering incorrectly.
+             */
+            const cleanupPageFlipHandler = () => {
+                if (pageFlipTimeupdateHandler) {
+                    this.mediaOverlay.audio?.removeEventListener('timeupdate', pageFlipTimeupdateHandler)
+                    pageFlipTimeupdateHandler = null
+                }
+            }
+
+            /**
+             * Detects when a sentence spans multiple pages/columns in the reader.
+             *
+             * PROBLEM:
+             * In readalong/media-overlay mode, when audio narration reads a sentence that
+             * starts on the current visible page but continues onto the next page, the audio
+             * keeps playing while the continuation text is off-screen. This creates a poor
+             * reading experience where you hear words you can't see.
+             *
+             * SOLUTION:
+             * Detect when a sentence spans pages and schedule a page flip partway through
+             * the audio playback, proportional to how much of the sentence is visible.
+             *
+             * HOW IT WORKS:
+             * We project each client rect of the highlighted sentence into the reading
+             * viewport (the paginator element) and measure the area that remains visible.
+             * If a significant portion of the text sits outside of that viewport in the
+             * forward reading direction, we treat it as a page-spanning sentence.
+             *
+             * ALGORITHM:
+             * 1. Collect all non-zero client rects for the sentence.
+             * 2. Accumulate the total rect area alongside the portion that intersects
+             *    with the viewport.
+             * 3. Track how much area is hidden before and after the viewport bounds
+             *    (left/right in horizontal layouts).
+             * 4. When more than 10% of the sentence lies past the forward boundary and
+             *    the visible portion is noticeably smaller (<98%), return visibility
+             *    ratios so we can time the flip.
+             *
+             * EDGE CASES:
+             * - Two-column spreads stay fully inside the viewport, so no flip occurs.
+             * - RTL flows flip the direction calculation automatically.
+             * - Vertical writing modes are ignored for now until we implement matching
+             *   axis-aware checks.
+             *
+             * @param {Element} el - The DOM element being highlighted (the sentence)
+             * @param {Document} doc - The document containing the element
+             * @param {Object} renderer - The foliate paginator/renderer with layout info
+             * @returns {Object|null} - {visibleRatio, offScreenRatio} if split, null otherwise
+             */
+            const getElementSplitInfo = (el, doc, renderer) => {
+                if (!el || !doc?.defaultView || !renderer) return null
+                if (renderer.scrolled) return null
+
+                const rects = Array.from(el.getClientRects())
+                    .filter(rect => rect.width > 0 && rect.height > 0)
+                if (!rects.length) return null
+
+                const defaultView = doc.defaultView
+                const frameElement = defaultView.frameElement
+                const rendererRect = renderer.getBoundingClientRect?.()
+                if (!frameElement || !rendererRect
+                    || !rendererRect.width || !rendererRect.height) return null
+
+                const frameRect = frameElement.getBoundingClientRect()
+                const viewportRect = {
+                    left: Math.max(rendererRect.left, frameRect.left),
+                    right: Math.min(rendererRect.right, frameRect.right),
+                    top: Math.max(rendererRect.top, frameRect.top),
+                    bottom: Math.min(rendererRect.bottom, frameRect.bottom)
+                }
+                if (viewportRect.left >= viewportRect.right
+                    || viewportRect.top >= viewportRect.bottom) return null
+
+                const writingMode =
+                    defaultView.getComputedStyle(doc.body)?.writingMode ?? ''
+                // Vertical layouts require additional handling; skip for now
+                if (writingMode.startsWith('vertical')) return null
+
+                const rtl = renderer.getAttribute?.('dir') === 'rtl'
+
+                let totalArea = 0
+                let visibleArea = 0
+                let forwardArea = 0
+                let backwardArea = 0
+
+                for (const rect of rects) {
+                    const area = rect.width * rect.height
+                    if (!area) continue
+                    totalArea += area
+
+                    const globalLeft = frameRect.left + rect.left
+                    const globalRight = frameRect.left + rect.right
+                    const globalTop = frameRect.top + rect.top
+                    const globalBottom = frameRect.top + rect.bottom
+
+                    const overlapLeft = Math.max(globalLeft, viewportRect.left)
+                    const overlapRight = Math.min(globalRight, viewportRect.right)
+                    const overlapTop = Math.max(globalTop, viewportRect.top)
+                    const overlapBottom = Math.min(globalBottom, viewportRect.bottom)
+                    const overlapWidth = Math.max(0, overlapRight - overlapLeft)
+                    const overlapHeight = Math.max(0, overlapBottom - overlapTop)
+
+                    if (overlapWidth > 0 && overlapHeight > 0) {
+                        visibleArea += overlapWidth * overlapHeight
+                    }
+
+                    const verticalOverlap = Math.max(0,
+                        Math.min(globalBottom, viewportRect.bottom)
+                        - Math.max(globalTop, viewportRect.top))
+                    if (verticalOverlap <= 0) continue
+
+                    const forwardHiddenWidth = rtl
+                        ? Math.max(0, Math.min(rect.width,
+                            viewportRect.left - globalLeft))
+                        : Math.max(0, Math.min(rect.width,
+                            globalRight - viewportRect.right))
+                    const backwardHiddenWidth = rtl
+                        ? Math.max(0, Math.min(rect.width,
+                            globalRight - viewportRect.right))
+                        : Math.max(0, Math.min(rect.width,
+                            viewportRect.left - globalLeft))
+
+                    if (forwardHiddenWidth > 0) {
+                        forwardArea += forwardHiddenWidth * verticalOverlap
+                    }
+                    if (backwardHiddenWidth > 0) {
+                        backwardArea += backwardHiddenWidth * verticalOverlap
+                    }
+                }
+
+                if (!totalArea || !visibleArea) return null
+
+                const visibleRatio = visibleArea / totalArea
+                const forwardRatio = forwardArea / totalArea
+                const backwardRatio = backwardArea / totalArea
+
+                if (visibleRatio >= 0.98) return null
+
+                const progressionRatio = rtl ? backwardRatio : forwardRatio
+                const oppositeRatio = rtl ? forwardRatio : backwardRatio
+
+                if (progressionRatio < 0.1) return null
+                if (progressionRatio <= oppositeRatio) return null
+
+                return {
+                    visibleRatio,
+                    offScreenRatio: progressionRatio
+                }
+            }
+
+            /**
+             * Handle media overlay highlighting with mid-sentence page flip support.
+             *
+             * When a sentence is highlighted during audio narration, this handler:
+             * 1. Navigates to show the sentence (via renderer.goTo)
+             * 2. Applies highlighting CSS classes
+             * 3. Checks if the sentence spans multiple pages
+             * 4. If split detected: schedules a page flip partway through audio playback
+             *
+             * TIMING CALCULATION:
+             * If a sentence has 30% of its content visible on the current page and 70%
+             * on the next page, we flip the page when the audio reaches 30% completion.
+             * This keeps the text being read visible throughout playback.
+             *
+             * Example:
+             * - Sentence audio: 2306.625s to 2315.691s (9.066s duration)
+             * - visibleRatio: 0.25 (25% visible, 75% on next page)
+             * - Flip time: 2306.625 + (9.066 × 0.25) = 2308.89s
+             * - At 2308.89s, page flips to show the remaining 75% of the sentence
+             */
             this.mediaOverlay.addEventListener('highlight', e => {
+                cleanupPageFlipHandler()
+
                 const resolved = this.resolveNavigation(e.detail.text)
                 this.renderer.goTo(resolved)
                     .then(() => {
@@ -280,9 +457,43 @@ export class View extends HTMLElement {
                         if (playbackActiveClass) el.ownerDocument
                             .documentElement.classList.add(playbackActiveClass)
                         lastActive = new WeakRef(el)
+
+                        const currentItem = this.mediaOverlay.activeItem
+                        if (!currentItem || !this.mediaOverlay.audio) return
+
+                        const splitInfo = getElementSplitInfo(el, doc, this.renderer)
+
+                        if (splitInfo && !this.renderer.atEnd) {
+                            const duration = (currentItem.end ?? 0) - (currentItem.begin ?? 0)
+
+                            console.log('Split detected!', {
+                                duration,
+                                visibleRatio: splitInfo.visibleRatio,
+                                offScreenRatio: splitInfo.offScreenRatio
+                            })
+
+                            if (duration > 0.5) {
+                                const flipTime = (currentItem.begin ?? 0) + (duration * splitInfo.visibleRatio)
+
+                                console.log('Scheduling flip at', flipTime)
+
+                                pageFlipTimeupdateHandler = () => {
+                                    const audio = this.mediaOverlay.audio
+                                    if (audio && audio.currentTime >= flipTime) {
+                                        console.log('Flipping page! Current time:', audio.currentTime)
+                                        cleanupPageFlipHandler()
+                                        this.renderer.next?.().catch(err =>
+                                            console.warn('Media overlay page flip error:', err))
+                                    }
+                                }
+
+                                this.mediaOverlay.audio.addEventListener('timeupdate', pageFlipTimeupdateHandler)
+                            }
+                        }
                     })
             })
             this.mediaOverlay.addEventListener('unhighlight', () => {
+                cleanupPageFlipHandler()
                 const el = lastActive?.deref()
                 if (el) {
                     el.classList.remove(activeClass)

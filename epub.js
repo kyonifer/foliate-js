@@ -720,6 +720,15 @@ class MediaOverlay extends EventTarget {
         this.#rate = rate
         if (this.#audio) this.#audio.playbackRate = rate
     }
+    get audio() {
+        return this.#audio
+    }
+    get activeItem() {
+        return this.#activeItem
+    }
+    get activeAudio() {
+        return this.#activeAudio
+    }
 }
 
 const isUUID = /([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})/
