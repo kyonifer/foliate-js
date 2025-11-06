@@ -448,20 +448,29 @@ export class View extends HTMLElement {
                 cleanupPageFlipHandler()
 
                 const resolved = this.resolveNavigation(e.detail.text)
-                this.renderer.goTo(resolved)
-                    .then(() => {
-                        const { doc } = this.renderer.getContents()
-                            .find(x => x.index = resolved.index)
-                        const el = resolved.anchor(doc)
-                        el.classList.add(activeClass)
-                        if (playbackActiveClass) el.ownerDocument
-                            .documentElement.classList.add(playbackActiveClass)
-                        lastActive = new WeakRef(el)
+                const shouldNavigate = this.mediaOverlay.autoScroll !== false
+
+                const highlightElement = () => {
+                    const { doc } = this.renderer.getContents()
+                        .find(x => x.index = resolved.index)
+                    const el = resolved.anchor(doc)
+                    el.classList.add(activeClass)
+                    if (playbackActiveClass) el.ownerDocument
+                        .documentElement.classList.add(playbackActiveClass)
+                    lastActive = new WeakRef(el)
+                }
+
+                if (shouldNavigate) {
+                    this.renderer.goTo(resolved).then(() => {
+                        highlightElement()
 
                         const currentItem = this.mediaOverlay.activeItem
                         if (!currentItem || !this.mediaOverlay.audio) return
 
-                        const splitInfo = getElementSplitInfo(el, doc, this.renderer)
+                        const { doc: currentDoc } = this.renderer.getContents()
+                            .find(x => x.index = resolved.index)
+                        const currentEl = resolved.anchor(currentDoc)
+                        const splitInfo = getElementSplitInfo(currentEl, currentDoc, this.renderer)
 
                         if (splitInfo && !this.renderer.atEnd) {
                             const duration = (currentItem.end ?? 0) - (currentItem.begin ?? 0)
@@ -495,6 +504,23 @@ export class View extends HTMLElement {
                             }
                         }
                     })
+                } else {
+                    try {
+                        const contents = this.renderer.getContents()
+                        const match = contents.find(x => x.index === resolved.index)
+                        if (match) {
+                            const el = resolved.anchor(match.doc)
+                            if (el) {
+                                el.classList.add(activeClass)
+                                if (playbackActiveClass) el.ownerDocument
+                                    .documentElement.classList.add(playbackActiveClass)
+                                lastActive = new WeakRef(el)
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Could not highlight element (autoScroll disabled):', e)
+                    }
+                }
             })
             this.mediaOverlay.addEventListener('unhighlight', () => {
                 cleanupPageFlipHandler()

@@ -407,6 +407,7 @@ class MediaOverlay extends EventTarget {
     #bookDuration = null
     #bookDurationPromise = null
     #lastKnownChapterElapsed = 0
+    autoScroll = true
     constructor(book, loadXML) {
         super()
         this.book = book
