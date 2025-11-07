@@ -601,6 +601,7 @@ class MediaOverlay extends EventTarget {
         this.#audio = audio
         audio.volume = this.#volume
         audio.playbackRate = this.#rate
+        audio.load() // Required for iOS - doesn't auto-load blob URLs
         audio.addEventListener('timeupdate', () => {
             if (token !== this.#taskToken) return
             if (audio.paused) return
