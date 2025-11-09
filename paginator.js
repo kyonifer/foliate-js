@@ -449,6 +449,8 @@ export class Paginator extends HTMLElement {
     #touchState
     #touchScrolled
     #lastVisibleRange
+    #gestureInProgress = false
+    #lastPage = null
     constructor() {
         super()
         this.#root.innerHTML = `<style>
@@ -827,6 +829,8 @@ export class Paginator extends HTMLElement {
             t: e.timeStamp,
             vx: 0, xy: 0,
         }
+        this.#gestureInProgress = true
+        this.#lastPage = this.page
     }
     #onTouchMove(e) {
         const state = this.#touchState
@@ -956,6 +960,16 @@ export class Paginator extends HTMLElement {
         if (reason !== 'selection' && reason !== 'navigation' && reason !== 'anchor')
             this.#anchor = range
         else this.#justAnchored = true
+
+        if (reason === 'snap' && this.#gestureInProgress && this.page !== this.#lastPage) {
+            this.dispatchEvent(new CustomEvent('page-flip', {
+                detail: { fromPage: this.#lastPage, toPage: this.page },
+                bubbles: true,
+                composed: true
+            }))
+            this.#gestureInProgress = false
+        }
+        this.#lastPage = this.page
 
         const index = this.#index
         const detail = { reason, range, index }
