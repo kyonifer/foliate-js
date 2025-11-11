@@ -731,6 +731,36 @@ class MediaOverlay extends EventTarget {
     get activeAudio() {
         return this.#activeAudio
     }
+    findFirstAnchorInSMIL(candidateAnchors, sectionHref) {
+        if (!this.#entries || !Array.isArray(candidateAnchors)) return null
+
+        const anchorsBySection = new Map()
+
+        for (const entry of this.#entries) {
+            for (const item of entry.items) {
+                const parts = item.text.split('#')
+                const href = parts[0]
+                const anchor = parts[1]
+
+                if (anchor) {
+                    if (!anchorsBySection.has(href)) {
+                        anchorsBySection.set(href, new Set())
+                    }
+                    anchorsBySection.get(href).add(anchor)
+                }
+            }
+        }
+
+        const targetAnchors = sectionHref && anchorsBySection.has(sectionHref)
+            ? anchorsBySection.get(sectionHref)
+            : new Set(Array.from(anchorsBySection.values()).flatMap(s => Array.from(s)))
+
+        for (const candidate of candidateAnchors) {
+            if (targetAnchors.has(candidate)) return candidate
+        }
+
+        return null
+    }
 }
 
 const isUUID = /([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})/
