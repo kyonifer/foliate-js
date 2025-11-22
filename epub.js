@@ -761,6 +761,37 @@ class MediaOverlay extends EventTarget {
 
         return null
     }
+    async getAllSMILEntries() {
+        const sections = this.book?.sections ?? []
+        const results = []
+        for (let index = 0; index < sections.length; index++) {
+            const section = sections[index]
+            const { mediaOverlay } = section ?? {}
+            if (!mediaOverlay) {
+                results.push([])
+                continue
+            }
+            try {
+                const entries = await this.#parseMediaOverlayEntries(mediaOverlay)
+                const flatEntries = []
+                for (const entry of entries) {
+                    for (const item of entry.items) {
+                        flatEntries.push({
+                            text: item.text,
+                            audioFile: entry.src,
+                            begin: item.begin,
+                            end: item.end,
+                        })
+                    }
+                }
+                results.push(flatEntries)
+            } catch (error) {
+                console.error(`Failed to parse SMIL for section ${index}:`, error)
+                results.push([])
+            }
+        }
+        return results
+    }
 }
 
 const isUUID = /([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{12})/
