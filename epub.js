@@ -599,9 +599,9 @@ class MediaOverlay extends EventTarget {
             return
         }
         this.#audio = audio
+        audio.load() // Required for iOS - doesn't auto-load blob URLs
         audio.volume = this.#volume
         audio.playbackRate = this.#rate
-        audio.load() // Required for iOS - doesn't auto-load blob URLs
         audio.addEventListener('timeupdate', () => {
             if (token !== this.#taskToken) return
             if (audio.paused) return
@@ -646,6 +646,7 @@ class MediaOverlay extends EventTarget {
             // for some reason need to seek in `canplaythrough`
             // or it won't play when skipping in WebKit
             audio.currentTime = this.#activeItem.begin ?? 0
+            audio.playbackRate = this.#rate
             this.#state = 'playing'
             audio.play().catch(e => this.#error(e))
         }, { once: true })
