@@ -562,10 +562,11 @@ class MediaOverlay extends EventTarget {
             durationComputationState: {
                 hasBookDuration: this.#bookDuration !== null,
             },
+            currentFragment: this.#activeItem?.text ?? null,
         }
     }
     get #activeAudio() {
-        return this.#entries[this.#audioIndex]
+        return this.#entries?.[this.#audioIndex]
     }
     get #activeItem() {
         return this.#activeAudio?.items?.[this.#itemIndex]
