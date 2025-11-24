@@ -666,6 +666,8 @@ class MediaOverlay extends EventTarget {
         await this.#loadSMIL(mediaOverlay)
         this.#ensureBookDurationComputation()
 
+        if (this.#state == null) this.#state = 'paused'
+
         for (let i = 0; i < this.#entries.length; i++) {
             const { items } = this.#entries[i]
             for (let j = 0; j < items.length; j++) {
