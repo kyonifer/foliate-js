@@ -398,6 +398,8 @@ class MediaOverlay extends EventTarget {
     #audioIndex
     #itemIndex
     #audio
+    #currentObjectUrl = null
+    #audioEventHandlers = []
     #volume = 1
     #rate = 1
     #state
@@ -579,13 +581,68 @@ class MediaOverlay extends EventTarget {
         this.dispatchEvent(new CustomEvent('highlight', { detail: this.#activeItem }))
         this.#emitProgress()
     }
-    #unhighlight() {
-        this.dispatchEvent(new CustomEvent('unhighlight', { detail: this.#activeItem }))
+    #unhighlight(item = this.#activeItem) {
+        if (!item) return
+        this.dispatchEvent(new CustomEvent('unhighlight', { detail: item }))
         this.#emitProgress()
     }
+    #clearAudioEventHandlers() {
+        if (!this.#audio || !this.#audioEventHandlers.length) return
+        for (const { type, handler } of this.#audioEventHandlers) {
+            this.#audio.removeEventListener(type, handler)
+        }
+        this.#audioEventHandlers = []
+    }
+    #revokeCurrentObjectUrl() {
+        if (!this.#currentObjectUrl) return
+        try {
+            URL.revokeObjectURL(this.#currentObjectUrl)
+        } catch (e) {
+            console.warn('MediaOverlay: Failed to revoke object URL', e)
+        }
+        this.#currentObjectUrl = null
+    }
+    #seekWithinCurrentAudio(targetItemIndex) {
+        if (!this.#audio) return false
+        const activeAudio = this.#activeAudio
+        const targetItem = activeAudio?.items?.[targetItemIndex]
+        if (!targetItem) return false
+
+        const previousItem = this.#activeItem
+        if (previousItem && previousItem !== targetItem) this.#unhighlight(previousItem)
+
+        this.#itemIndex = targetItemIndex
+
+        try {
+            this.#audio.currentTime = targetItem.begin ?? 0
+        } catch (error) {
+            console.warn('MediaOverlay: Failed to seek within current audio', error)
+        }
+
+        this.#audio.volume = this.#volume
+        this.#audio.playbackRate = this.#rate
+
+        if (this.#state === 'paused') {
+            this.#audio.pause()
+            this.#highlight()
+        } else {
+            this.#state = 'playing'
+            this.#audio.play().catch(e => this.#error(e))
+        }
+
+        this.#emitProgress()
+        return true
+    }
     async #play(audioIndex, itemIndex, token) {
-        this.#stop()
         if (token !== this.#taskToken) return
+
+        const previousItem = this.#activeItem
+        if (previousItem) this.#unhighlight(previousItem)
+
+        this.#clearAudioEventHandlers()
+        this.#audio?.pause()
+        this.#revokeCurrentObjectUrl()
+
         this.#audioIndex = audioIndex
         this.#itemIndex = itemIndex
         const src = this.#activeAudio?.src
@@ -594,16 +651,29 @@ class MediaOverlay extends EventTarget {
         const blob = await this.book.loadBlob(src)
         if (token !== this.#taskToken) return
         const url = URL.createObjectURL(blob)
-        const audio = new Audio(url)
         if (token !== this.#taskToken) {
             URL.revokeObjectURL(url)
             return
         }
+
+        let audio = this.#audio
+        const isNewAudioElement = !audio
+        if (!audio) audio = new Audio()
         this.#audio = audio
+
+        if (isNewAudioElement) {
+            this.dispatchEvent(new CustomEvent('audiochange', { detail: audio }))
+        }
+
+        this.#currentObjectUrl = url
+        audio.src = url
         audio.load() // Required for iOS - doesn't auto-load blob URLs
         audio.volume = this.#volume
         audio.playbackRate = this.#rate
-        audio.addEventListener('timeupdate', () => {
+
+        this.#audioEventHandlers = []
+
+        const timeupdateHandler = () => {
             if (token !== this.#taskToken) return
             if (audio.paused) return
             const t = audio.currentTime
@@ -619,41 +689,59 @@ class MediaOverlay extends EventTarget {
             while (items[this.#itemIndex + 1]?.begin <= t) this.#itemIndex++
             if (this.#itemIndex !== oldIndex) this.#highlight()
             this.#emitProgress()
-        })
-        audio.addEventListener('error', () => {
+        }
+        audio.addEventListener('timeupdate', timeupdateHandler)
+        this.#audioEventHandlers.push({ type: 'timeupdate', handler: timeupdateHandler })
+
+        const errorHandler = () => {
             if (token !== this.#taskToken) return
             this.#error(new Error(`Failed to load ${src}`))
             this.#emitProgress()
-        })
-        audio.addEventListener('playing', () => {
+        }
+        audio.addEventListener('error', errorHandler)
+        this.#audioEventHandlers.push({ type: 'error', handler: errorHandler })
+
+        const playingHandler = () => {
             if (token !== this.#taskToken) return
             this.#highlight()
             this.#emitProgress()
-        })
-        audio.addEventListener('ended', () => {
+        }
+        audio.addEventListener('playing', playingHandler)
+        this.#audioEventHandlers.push({ type: 'playing', handler: playingHandler })
+
+        const endedHandler = () => {
             if (token !== this.#taskToken) return
             this.#unhighlight()
-            URL.revokeObjectURL(url)
-            this.#audio = null
+            if (this.#currentObjectUrl === url) this.#revokeCurrentObjectUrl()
             this.#play(audioIndex + 1, 0, this.#taskToken).catch(e => this.#error(e))
             this.#emitProgress()
-        })
+        }
+        audio.addEventListener('ended', endedHandler)
+        this.#audioEventHandlers.push({ type: 'ended', handler: endedHandler })
+
         if (this.#state === 'paused') {
             this.#highlight()
             audio.currentTime = this.#activeItem.begin ?? 0
         }
-        else audio.addEventListener('canplaythrough', () => {
-            if (token !== this.#taskToken) return
-            // for some reason need to seek in `canplaythrough`
-            // or it won't play when skipping in WebKit
-            audio.currentTime = this.#activeItem.begin ?? 0
-            audio.playbackRate = this.#rate
-            this.#state = 'playing'
-            audio.play().catch(e => this.#error(e))
-        }, { once: true })
+        else {
+            const canplayHandler = () => {
+                if (token !== this.#taskToken) return
+                // for some reason need to seek in `canplaythrough`
+                // or it won't play when skipping in WebKit
+                audio.currentTime = this.#activeItem.begin ?? 0
+                audio.playbackRate = this.#rate
+                this.#state = 'playing'
+                audio.play().catch(e => this.#error(e))
+            }
+            audio.addEventListener('canplaythrough', canplayHandler, { once: true })
+            this.#audioEventHandlers.push({ type: 'canplaythrough', handler: canplayHandler })
+        }
         this.#emitProgress()
     }
     async start(sectionIndex, filter = () => true) {
+        const previousItem = this.#activeItem
+        if (previousItem) this.#unhighlight(previousItem)
+
         this.#audio?.pause()
         const token = ++this.#taskToken
         const section = this.book.sections[sectionIndex]
@@ -689,8 +777,9 @@ class MediaOverlay extends EventTarget {
     }
     #stop() {
         if (this.#audio) {
+            this.#clearAudioEventHandlers()
             this.#audio.pause()
-            URL.revokeObjectURL(this.#audio.src)
+            this.#revokeCurrentObjectUrl()
             this.#audio = null
             this.#unhighlight()
             this.#emitProgress()
@@ -703,20 +792,31 @@ class MediaOverlay extends EventTarget {
     }
     prev() {
         if (this.#itemIndex > 0) {
+            const handled = this.#seekWithinCurrentAudio(this.#itemIndex - 1)
+            if (handled) return
             const token = ++this.#taskToken
             this.#play(this.#audioIndex, this.#itemIndex - 1, token)
         }
         else if (this.#audioIndex > 0) {
             const token = ++this.#taskToken
-            this.#play(this.#audioIndex - 1,
-                this.#entries[this.#audioIndex - 1].items.length - 1, token)
+            const previousEntry = this.#entries?.[this.#audioIndex - 1]
+            const lastItemIndex = Math.max(0, (previousEntry?.items?.length ?? 1) - 1)
+            this.#play(this.#audioIndex - 1, lastItemIndex, token)
         }
         else if (this.#sectionIndex > 0)
             this.start(this.#sectionIndex - 1, (_, i, items) => i === items.length - 1)
     }
     next() {
+        const handled = this.#seekWithinCurrentAudio(this.#itemIndex + 1)
+        if (handled) return
+
         const token = ++this.#taskToken
-        this.#play(this.#audioIndex, this.#itemIndex + 1, token)
+
+        const nextAudioIndex = this.#audioIndex + 1
+        const hasNextEntry = Array.isArray(this.#entries) && nextAudioIndex < this.#entries.length
+
+        if (hasNextEntry) this.#play(nextAudioIndex, 0, token)
+        else this.#play(this.#audioIndex, this.#itemIndex + 1, token)
     }
     setVolume(volume) {
         this.#volume = volume
