@@ -410,6 +410,7 @@ class MediaOverlay extends EventTarget {
     #bookDurationPromise = null
     #lastKnownChapterElapsed = 0
     autoScroll = true
+    audioElementFactory = () => new Audio()
     constructor(book, loadXML) {
         super()
         this.book = book
@@ -658,11 +659,23 @@ class MediaOverlay extends EventTarget {
 
         let audio = this.#audio
         const isNewAudioElement = !audio
-        if (!audio) audio = new Audio()
+        if (!audio) audio = this.audioElementFactory()
         this.#audio = audio
 
         if (isNewAudioElement) {
             this.dispatchEvent(new CustomEvent('audiochange', { detail: audio }))
+        }
+
+        // Notify AudioFacade of current entry if it supports the method
+        if (typeof audio.setCurrentEntry === 'function') {
+            const item = this.#activeItem
+            audio.setCurrentEntry(
+                this.#sectionIndex,
+                this.#itemIndex,
+                src,
+                item?.begin ?? 0,
+                item?.end ?? 0
+            )
         }
 
         this.#currentObjectUrl = url
