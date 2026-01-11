@@ -310,6 +310,14 @@ class View {
         const vertical = this.#vertical
         this.#size = vertical ? height : width
 
+        // Reset element/iframe to viewport size BEFORE setting CSS column styles
+        // This forces CSS columns to reflow to the new viewport constraints
+        // Without this, columns would fill the old expanded width from previous orientation
+        const side = vertical ? 'height' : 'width'
+        const viewportSize = vertical ? height : width
+        this.#iframe.style[side] = `${viewportSize}px`
+        this.#element.style[side] = `${viewportSize}px`
+
         const doc = this.document
         setStylesImportant(doc.documentElement, {
             'box-sizing': 'border-box',
